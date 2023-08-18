@@ -19,6 +19,12 @@
     },
     "useAPIM": {
       "value": "${USE_APIM=false}"
+    },
+    "useVirtualNetworkIntegration": {
+      "value": "${USE_VIRTUAL_NETWORK_INTEGRATION=false}"
+    },
+    "useVirtualNetworkPrivateEndpoint": {
+      "value": "${USE_VIRTUAL_NETWORK_PRIVATE_ENDPOINT=false}"
     }
   }
 }

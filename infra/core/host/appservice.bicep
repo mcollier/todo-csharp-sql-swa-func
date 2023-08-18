@@ -36,6 +36,14 @@ param use32BitWorkerProcess bool = false
 param ftpsState string = 'FtpsOnly'
 param healthCheckPath string = ''
 
+//NEW
+param virtualNetworkSubnetId string = ''
+param vnetRouteAllEnabled bool = false
+param functionsRuntimeScaleMonitoringEnabled bool = false
+param functionsExtensionVersion string = ''
+
+var isFunctionApp = contains(kind, 'functionapp')
+
 resource appService 'Microsoft.Web/sites@2022-03-01' = {
   name: name
   location: location
@@ -43,7 +51,21 @@ resource appService 'Microsoft.Web/sites@2022-03-01' = {
   kind: kind
   properties: {
     serverFarmId: appServicePlanId
+
+    // NEW
+    virtualNetworkSubnetId: !empty(virtualNetworkSubnetId) ? virtualNetworkSubnetId : null
+
     siteConfig: {
+      // NEW
+      vnetRouteAllEnabled: vnetRouteAllEnabled
+      functionsRuntimeScaleMonitoringEnabled: functionsRuntimeScaleMonitoringEnabled
+      appSettings: isFunctionApp ? [
+        {
+          name: 'FUNCTIONS_EXTENSION_VERSION'
+          value: functionsExtensionVersion
+        }
+      ] : []
+
       linuxFxVersion: linuxFxVersion
       alwaysOn: alwaysOn
       ftpsState: ftpsState
@@ -64,7 +86,9 @@ resource appService 'Microsoft.Web/sites@2022-03-01' = {
 
   identity: { type: managedIdentity ? 'SystemAssigned' : 'None' }
 
-  resource configLogs 'config' = {
+  // NOTE: App Service logs aren't used for Function Apps. This isn't working with EP plans
+  // when setting WEBSITE_CONTENTAZUREFILECONNECTIONSTRING and WEBSITE_CONTENTSHARE
+  resource configLogs 'config' = if (!isFunctionApp) {
     name: 'logs'
     properties: {
       applicationLogs: { fileSystem: { level: 'Verbose' } }
@@ -100,7 +124,7 @@ module config 'appservice-appsettings.bicep' = if (!empty(appSettings)) {
         SCM_DO_BUILD_DURING_DEPLOYMENT: string(scmDoBuildDuringDeployment)
         ENABLE_ORYX_BUILD: string(enableOryxBuild)
       },
-      runtimeName == 'python' && appCommandLine == '' ? { PYTHON_ENABLE_GUNICORN_MULTIWORKERS: 'true'} : {},
+      runtimeName == 'python' && appCommandLine == '' ? { PYTHON_ENABLE_GUNICORN_MULTIWORKERS: 'true' } : {},
       !empty(applicationInsightsName) ? { APPLICATIONINSIGHTS_CONNECTION_STRING: applicationInsights.properties.ConnectionString } : {},
       !empty(keyVaultName) ? { AZURE_KEY_VAULT_ENDPOINT: keyVault.properties.vaultUri } : {})
   }
@@ -117,3 +141,4 @@ resource applicationInsights 'Microsoft.Insights/components@2020-02-02' existing
 output identityPrincipalId string = managedIdentity ? appService.identity.principalId : ''
 output name string = appService.name
 output uri string = 'https://${appService.properties.defaultHostName}'
+output id string = appService.id

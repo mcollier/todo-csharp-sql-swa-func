@@ -40,9 +40,22 @@ param sqlAdminPassword string
 @description('Application user password')
 param appUserPassword string
 
+param useVirtualNetworkIntegration bool = false
+param useVirtualNetworkPrivateEndpoint bool = false
+
 var abbrs = loadJsonContent('./abbreviations.json')
 var resourceToken = toLower(uniqueString(subscription().id, environmentName, location))
 var tags = { 'azd-env-name': environmentName }
+
+var useVirtualNetwork = useVirtualNetworkIntegration || useVirtualNetworkPrivateEndpoint
+var virtualNetworkAddressSpacePrefix = '10.1.0.0/16'
+var virtualNeworkIntegrationSubnetAddressSpacePrefix = '10.1.1.0/24'
+var virtualNetworkPrivateEndpointSubnetAddressSpacePrefix = '10.1.2.0/24'
+var virtualNetworkName = '${abbrs.networkVirtualNetworks}${resourceToken}'
+var virtualNetworkIntegrationSubnetName = '${abbrs.networkVirtualNetworksSubnets}${resourceToken}-int'
+var virtualNetworkPrivateEndpointSubnetName = '${abbrs.networkVirtualNetworksSubnets}${resourceToken}-pe'
+
+var apiName = !empty(apiServiceName) ? apiServiceName : '${abbrs.webSitesFunctions}api-${resourceToken}'
 
 // Organize resources in a resource group
 resource rg 'Microsoft.Resources/resourceGroups@2021-04-01' = {
@@ -67,17 +80,21 @@ module api './app/api.bicep' = {
   name: 'api'
   scope: rg
   params: {
-    name: !empty(apiServiceName) ? apiServiceName : '${abbrs.webSitesFunctions}api-${resourceToken}'
+    name: apiName
     location: location
     tags: tags
     applicationInsightsName: monitoring.outputs.applicationInsightsName
-    appServicePlanId: appServicePlan.outputs.id
+    appServicePlanName: '${abbrs.webServerFarms}${resourceToken}'
     keyVaultName: keyVault.outputs.name
     storageAccountName: storage.outputs.name
     allowedOrigins: [ web.outputs.SERVICE_WEB_URI ]
     appSettings: {
       AZURE_SQL_CONNECTION_STRING_KEY: sqlServer.outputs.connectionStringKey
     }
+    useVirtualNetworkIntegration: useVirtualNetworkIntegration
+    useVirtualNetworkPrivateEndpoint: false
+    virtualNetworkName: useVirtualNetworkIntegration ? vnet.outputs.virtualNetworkName : ''
+    virtualNetworkIntegrationSubnetName: useVirtualNetworkIntegration ? virtualNetworkIntegrationSubnetName : ''
   }
 }
 
@@ -129,6 +146,16 @@ module storage './core/storage/storage-account.bicep' = {
     name: !empty(storageAccountName) ? storageAccountName : '${abbrs.storageStorageAccounts}${resourceToken}'
     location: location
     tags: tags
+
+    fileShares: [
+      {
+        name: apiName
+      }
+    ]
+
+    useVirtualNetworkPrivateEndpoint: useVirtualNetworkPrivateEndpoint
+    virtualNetworkName: useVirtualNetworkPrivateEndpoint ? vnet.outputs.virtualNetworkName : ''
+    virtualNetworkPrivateEndpointSubnetName: useVirtualNetworkPrivateEndpoint ? virtualNetworkPrivateEndpointSubnetName : ''
   }
 }
 
@@ -185,6 +212,60 @@ module apimApi './app/apim-api.bicep' = if (useAPIM) {
   }
 }
 
+module integrationSubnetNsg 'core/networking/network-security-group.bicep' = if (useVirtualNetwork) {
+  name: 'integrationSubnetNsg'
+  scope: rg
+  params: {
+    name: '${abbrs.networkNetworkSecurityGroups}${resourceToken}-integration-subnet'
+    location: location
+  }
+}
+
+module privateEndpointSubnetNsg 'core/networking/network-security-group.bicep' = if (useVirtualNetwork) {
+  name: 'privateEndpointSubnetNsg'
+  scope: rg
+  params: {
+    name: '${abbrs.networkNetworkSecurityGroups}${resourceToken}-private-endpoint-subnet'
+    location: location
+  }
+}
+
+module vnet './core/networking/virtual-network.bicep' = if (useVirtualNetwork) {
+  name: 'vnet'
+  scope: rg
+  params: {
+    name: virtualNetworkName
+    location: location
+    tags: tags
+
+    virtualNetworkAddressSpacePrefix: virtualNetworkAddressSpacePrefix
+
+    // TODO: Find a better way to handle subnets. I'm not a fan of this array of object approach (losing Intellisense).
+    subnets: [
+      {
+        name: virtualNetworkIntegrationSubnetName
+        addressPrefix: virtualNeworkIntegrationSubnetAddressSpacePrefix
+        networkSecurityGroupId: useVirtualNetwork ? integrationSubnetNsg.outputs.id : null
+
+        delegations: [
+          {
+            name: 'delegation'
+            properties: {
+              serviceName: 'Microsoft.Web/serverFarms'
+            }
+          }
+        ]
+      }
+      {
+        name: virtualNetworkPrivateEndpointSubnetName
+        addressPrefix: virtualNetworkPrivateEndpointSubnetAddressSpacePrefix
+        networkSecurityGroupId: useVirtualNetwork ? privateEndpointSubnetNsg.outputs.id : null
+        privateEndpointNetworkPolicies: 'Disabled'
+      }
+    ]
+  }
+}
+
 // Data outputs
 output AZURE_SQL_CONNECTION_STRING_KEY string = sqlServer.outputs.connectionStringKey
 
@@ -198,4 +279,4 @@ output REACT_APP_API_BASE_URL string = useAPIM ? apimApi.outputs.SERVICE_API_URI
 output REACT_APP_APPLICATIONINSIGHTS_CONNECTION_STRING string = monitoring.outputs.applicationInsightsConnectionString
 output REACT_APP_WEB_BASE_URL string = web.outputs.SERVICE_WEB_URI
 output USE_APIM bool = useAPIM
-output SERVICE_API_ENDPOINTS array = useAPIM ? [ apimApi.outputs.SERVICE_API_URI, api.outputs.SERVICE_API_URI ]: []
+output SERVICE_API_ENDPOINTS array = useAPIM ? [ apimApi.outputs.SERVICE_API_URI, api.outputs.SERVICE_API_URI ] : []

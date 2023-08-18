@@ -22,8 +22,25 @@ param networkAcls object = {
   defaultAction: 'Allow'
 }
 @allowed([ 'Enabled', 'Disabled' ])
-param publicNetworkAccess string = 'Enabled'
+param publicNetworkAccess string = useVirtualNetworkPrivateEndpoint ? 'Disabled' : 'Enabled'
 param sku object = { name: 'Standard_LRS' }
+
+//NEW
+param fileShares array = []
+param useVirtualNetworkPrivateEndpoint bool = false
+param virtualNetworkName string = ''
+param virtualNetworkPrivateEndpointSubnetName string = ''
+
+var storageServices = [ 'table', 'blob', 'queue', 'file' ]
+
+// NEW
+resource vnet 'Microsoft.Network/virtualNetworks@2022-11-01' existing = if (useVirtualNetworkPrivateEndpoint) {
+  name: virtualNetworkName
+
+  resource privateEndpointSubnet 'subnets' existing = {
+    name: virtualNetworkPrivateEndpointSubnetName
+  }
+}
 
 resource storage 'Microsoft.Storage/storageAccounts@2022-05-01' = {
   name: name
@@ -55,7 +72,67 @@ resource storage 'Microsoft.Storage/storageAccounts@2022-05-01' = {
       }
     }]
   }
+
+  resource fileServices 'fileServices' = if (!empty(fileShares)) {
+    name: 'default'
+
+    resource share 'shares' = [for item in fileShares: {
+      name: item.name
+    }]
+  }
 }
+
+resource storagePrivateEndpoint 'Microsoft.Network/privateEndpoints@2022-11-01' = [for svc in storageServices: if (useVirtualNetworkPrivateEndpoint) {
+  name: 'pe-${svc}'
+  location: location
+  properties: {
+    subnet: {
+      id: vnet::privateEndpointSubnet.id
+      name: vnet::privateEndpointSubnet.name
+    }
+    privateLinkServiceConnections: [
+      {
+        id: storage.id
+        name: 'plsc-${svc}'
+        properties: {
+          privateLinkServiceId: storage.id
+          groupIds: [
+            svc
+          ]
+        }
+      }
+    ]
+  }
+}]
+
+resource privateDnsZone 'Microsoft.Network/privateDnsZones@2020-06-01' = [for svc in storageServices: if (useVirtualNetworkPrivateEndpoint) {
+  name: 'privatelink.${svc}.${environment().suffixes.storage}'
+  location: 'Global'
+}]
+
+resource privateDnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2022-11-01' = [for (svc, i) in storageServices: if (useVirtualNetworkPrivateEndpoint) {
+  parent: storagePrivateEndpoint[i]
+  name: 'dnsZoneGroup-${svc}'
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'config'
+        properties: {
+          privateDnsZoneId: privateDnsZone[i].id
+        }
+      }
+    ]
+  }
+}]
+
+module dnsZoneLink '../networking/dns-zone-vnet-link.bicep' = [for (svc, i) in storageServices: if (useVirtualNetworkPrivateEndpoint) {
+  name: 'privatelink-${svc}-vnet-link'
+  params: {
+    privateDnsZoneName: privateDnsZone[i].name
+    vnetId: vnet.id
+    vnetLinkName: 'vnet-${svc}-link'
+  }
+}]
 
 output name string = storage.name
 output primaryEndpoints object = storage.properties.primaryEndpoints
